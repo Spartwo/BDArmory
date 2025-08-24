@@ -254,12 +254,6 @@ namespace BDArmory.Weapons.Missiles
         public float deployTime = 0.2f;
 
         [KSPField]
-        public string cruiseAnimationName = "";
-
-        [KSPField]
-        public float cruiseDeployTime = 0.2f;
-
-        [KSPField]
         public string flightAnimationName = "";
 
         [KSPField]
@@ -288,8 +282,6 @@ namespace BDArmory.Weapons.Missiles
         //public float deployedTime;
 
         AnimationState[] deployStates;
-
-        AnimationState[] cruiseStates;
 
         AnimationState[] animStates;
 
@@ -742,10 +734,6 @@ namespace BDArmory.Weapons.Missiles
             else
             {
                 deployedDrag = simpleDrag;
-            }
-            if (cruiseAnimationName != "")
-            {
-                cruiseStates = GUIUtils.SetUpAnimation(cruiseAnimationName, part);
             }
             if (flightAnimationName != "")
             {
@@ -2338,7 +2326,6 @@ namespace BDArmory.Weapons.Missiles
             if (cruiseRangeTrigger > 0)
                 yield return new WaitUntilFixed(checkCruiseRangeTrigger);
 
-            if (cruiseStates != null) StartCoroutine(CruiseAnimRoutine());
             yield return StartCoroutine(CruiseRoutine());
         }
 
@@ -2377,27 +2364,6 @@ namespace BDArmory.Weapons.Missiles
             {
                 deployed = true;
                 using (var anim = deployStates.AsEnumerable().GetEnumerator())
-                    while (anim.MoveNext())
-                    {
-                        if (anim.Current == null) continue;
-                        anim.Current.enabled = true;
-                        anim.Current.speed = 1;
-                    }
-            }
-        }
-        IEnumerator CruiseAnimRoutine()
-        {
-            yield return new WaitForSecondsFixed(cruiseDeployTime);
-            if (cruiseStates == null)
-            {
-                if (BDArmorySettings.DEBUG_MISSILES) Debug.LogWarning("[BDArmory.MissileLauncher]: deployStates was null, aborting AnimRoutine.");
-                yield break;
-            }
-
-            if (!string.IsNullOrEmpty(cruiseAnimationName))
-            {
-                deployed = true;
-                using (var anim = cruiseStates.AsEnumerable().GetEnumerator())
                     while (anim.MoveNext())
                     {
                         if (anim.Current == null) continue;
