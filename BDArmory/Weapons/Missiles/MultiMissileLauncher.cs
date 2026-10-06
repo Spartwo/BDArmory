@@ -28,6 +28,9 @@ namespace BDArmory.Weapons.Missiles
         Vector3 dummyScale = Vector3.one;
         Coroutine missileSalvo;
 
+
+        [KSPField(isPersistant = true)] public string missileVariantName = ""; //variant selected on the munition that is applied to all the dummies and spawned instances
+
         [KSPField(isPersistant = true, guiActive = false, guiName = "#LOC_BDArmory_WeaponName", guiActiveEditor = false), UI_Label(affectSymCounterparts = UI_Scene.All, scene = UI_Scene.All)]//Weapon Name 
         public string loadedMissileName = "";
 
@@ -527,6 +530,7 @@ namespace BDArmory.Weapons.Missiles
                                     }
 
                                     subMunitionPath = GetMeshurl(partConfigTemp);
+                                    missileVariantName = MissileDummyVariant.GetSelectedVariantName(missile);
                                     if (adjustMissileVOffset)
                                     {
                                         var missileCOL = missile.GetComponentInChildren<Collider>();
@@ -779,6 +783,7 @@ namespace BDArmory.Weapons.Missiles
                 }
             }
             int loadedOrdnance = (BDArmorySettings.INFINITE_ORDINANCE ? launchTransforms.Length : missileSpawner != null ? Math.Min((int)missileSpawner.railAmmo, launchTransforms.Length) : launchTransforms.Length);
+            part.FindModuleImplementing<ModuleTubeCovers>()?.UpdateCovers(launchTransforms, loadedOrdnance);
             for (int i = 0; i < loadedOrdnance; i++)
             {
                 if (!refresh)
@@ -800,7 +805,7 @@ namespace BDArmory.Weapons.Missiles
                         Debug.LogError($"[BDArmory.MultiMissileLauncher]: Reminder! Model {subMunitionPath} not found. Cannot populate missile dummies!");
                         return;
                     }
-                    GameObject dummy = mslDummyPool[subMunitionPath].GetPooledObject();
+                    GameObject dummy = mslDummyPool[GetDummyPoolKey(subMunitionPath)].GetPooledObject();
                     MissileDummy dummyThis = dummy.GetComponentInChildren<MissileDummy>();
 
                     launchTransforms[i].localScale = new Vector3(1f / Scale, 1f / Scale, 1f / (LengthTransform != null ? Length : Scale));
@@ -913,7 +918,10 @@ namespace BDArmory.Weapons.Missiles
                 }
                 tubesFired++;
                 launchesThisSalvo++;
+                float accel = missileLauncher.dropTime > 0f ? 0f : missileLauncher.thrust / Mathf.Max(missileMass, 0.001f);// Pop off the tube's covers before the tube is hidden by scaling it to zero.
+                part.FindModuleImplementing<ModuleTubeCovers>()?.Eject(launchTransforms[m], accel, missileLauncher.decoupleSpeed);
                 launchTransforms[m].localScale = Vector3.zero;
+                missileSpawner.spawnVariantName = GetMissileVariantName();
                 //time to deduct ammo = !clustermissile or cluster missile still on plane
                 //time to not deduct ammo = in-flight clMsl
                 if (!missileSpawner.SpawnMissile(launchTransforms[m], offset * Length, adjustMissileVOffset ? attachedMissileDiameter / 2 : 0, !isLaunchedClusterMissile))
@@ -1653,9 +1661,25 @@ namespace BDArmory.Weapons.Missiles
             //Debug.Log($"[BDArmory.MultiMissileLauncher]: {targetV.GetName()}; assigned radar target {(ml.radarTarget.exists ? ml.radarTarget.vessel.GetName() : "null")}");
         }
 
+        string GetMissileVariantName()
+        {
+            var name = missileVariantName;
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(subMunitionName)) return "";
+            var missilePrefab = PartLoader.getPartInfoByName(subMunitionName)?.partPrefab;
+            return MissileDummyVariant.HasVariant(missilePrefab, name) ? name : "";
+        }
+
+        /// Dummy pools are shared between launchers, so variants get their own pool.
+        string GetDummyPoolKey(string modelpath)
+        {
+            var variantName = GetMissileVariantName();
+            var key = string.IsNullOrEmpty(subMunitionName) ? modelpath : $"{modelpath}|{subMunitionName}";
+            return string.IsNullOrEmpty(variantName) ? key : $"{key}|{variantName}";
+        }
+
         public bool SetupMissileDummyPool(string modelpath)
         {
-            var key = modelpath;
+            var key = GetDummyPoolKey(modelpath);
             if (!mslDummyPool.ContainsKey(key) || mslDummyPool[key] == null)
             {
                 var Template = GameDatabase.Instance.GetModel(modelpath);
@@ -1665,6 +1689,10 @@ namespace BDArmory.Weapons.Missiles
                     Debug.LogError("[BDArmory.MultiMissileLauncher]: model '" + modelpath + "' not found. Expect exceptions if trying to use this missile.");
                     return false;
                 }
+                MissileDummyVariant.ApplyModelTextures(PartLoader.getPartInfoByName(subMunitionName)?.partPrefab, Template, modelpath);
+                var variantName = GetMissileVariantName();
+                if (!string.IsNullOrEmpty(variantName))
+                    MissileDummyVariant.ApplyToModel(PartLoader.getPartInfoByName(subMunitionName)?.partPrefab, Template, variantName);
                 Template.SetActive(false);
                 Template.AddComponent<MissileDummy>();
                 mslDummyPool[key] = ObjectPool.CreateObjectPool(Template, 10, true, true);
