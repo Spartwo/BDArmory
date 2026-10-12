@@ -24,7 +24,7 @@ using static BDArmory.Bullets.PooledBullet;
 
 namespace BDArmory.Weapons
 {
-    public class ModuleWeapon : EngageableWeapon, IBDWeapon
+    public class ModuleWeapon : EngageableWeapon, IBDWeapon, IFireEffectOwner
     {
         #region Declarations
 
@@ -262,11 +262,7 @@ namespace BDArmory.Weapons
         float predictedFlightTime = 1; //for rockets
         Vector3 trajectoryOffset = Vector3.zero;
 
-        //gapless particles
-        List<BDAGaplessParticleEmitter> gaplessEmitters = new List<BDAGaplessParticleEmitter>();
-
-        //muzzleflash emitters
-        List<List<KSPParticleEmitter>> muzzleFlashList;
+        FireEffectController fireFX; // Muzzle flash and smoke.
 
         //module references
         [KSPField] public int turretID = 0;
@@ -419,7 +415,28 @@ namespace BDArmory.Weapons
         public Transform[] fireTransforms;
 
         [KSPField]
-        public string muzzleTransformName = "muzzleTransform";
+        public string muzzleTransformName = "muzzleTransform"; // Legacy: transforms of the emitters baked into the model, one per barrel. Used as the flash if fireEffectName isn't set.
+
+        // Fire effects, from the part's EFFECTS block (see FireEffectController). Each can name several effects (separated by ; or ,) for several barrels (one per barrel for ripple fire).
+        [KSPField] public string fireEffectName = ""; // The flash. If empty, the legacy muzzleTransformName emitters are the flash.
+        [KSPField] public string smokeEffectName = ""; // Smoke: fired at a power that follows the air density.
+        [KSPField] public string underwaterFireEffectName = ""; // Fired instead of the flash when underwater.
+        [KSPField] public string underwaterSmokeEffectName = ""; // Fired instead of the smoke when underwater.
+        [KSPField] public bool suppressEffectsUnderwater = false; // Underwater with no underwater effect: don't fire the normal one.
+        [KSPField] public float smokeAtmosphereResponse = 1f; // Smoke power = (air density / sea level density)^this. 0 = ignore the atmosphere.
+
+        public FireEffectSettings GetFireEffectSettings() => new FireEffectSettings
+        {
+            fireEffect = fireEffectName,
+            smokeEffect = smokeEffectName,
+            underwaterFireEffect = underwaterFireEffectName,
+            underwaterSmokeEffect = underwaterSmokeEffectName,
+            suppressUnderwater = suppressEffectsUnderwater,
+            smokeAtmosphereResponse = smokeAtmosphereResponse,
+            legacyTransformNames = muzzleTransformName,
+            legacyOneShotWorldParticles = oneShotWorldParticles,
+            legacyScaleWithPart = true,
+        };
 
         [KSPField]
         public string shellEjectTransformName = "shellEject";
@@ -1266,13 +1283,8 @@ namespace BDArmory.Weapons
             OriginalShortName = shortName;
             WeaponDisplayName = shortName;
             WeaponName = part.partInfo.name; //have weaponname be the .cfg part name, since not all weapons have a shortName in the .cfg
-            using (var emitter = part.FindModelComponents<KSPParticleEmitter>().AsEnumerable().GetEnumerator())
-                while (emitter.MoveNext())
-                {
-                    if (emitter.Current == null) continue;
-                    emitter.Current.emit = false;
-                    EffectBehaviour.AddParticleEmitter(emitter.Current);
-                }
+            // Muzzle flash and smoke: from this weapon's EFFECTS entries, or its legacy muzzleTransformName/oneShotWorldParticles. This module doesn't touch emitters itself.
+            fireFX = new FireEffectController(this, GetFireEffectSettings());
 
             if (eWeaponType != WeaponTypes.Laser || (eWeaponType == WeaponTypes.Laser && pulseLaser))
             {
@@ -1459,27 +1471,6 @@ namespace BDArmory.Weapons
                 if (laserMaxDamage < 0) laserMaxDamage = laserDamage;
                 if (laserTexList.Count > 1) dynamicFX = true;
             }
-            muzzleFlashList = new List<List<KSPParticleEmitter>>();
-            List<string> emitterList = BDAcTools.ParseNames(muzzleTransformName);
-            for (int i = 0; i < emitterList.Count; i++)
-            {
-                List<KSPParticleEmitter> muzzleFlashEmitters = new List<KSPParticleEmitter>();
-                using (var mtf = part.FindModelTransforms(emitterList[i]).AsEnumerable().GetEnumerator())
-                    while (mtf.MoveNext())
-                    {
-                        if (mtf.Current == null) continue;
-                        KSPParticleEmitter kpe = mtf.Current.GetComponent<KSPParticleEmitter>();
-                        if (kpe == null)
-                        {
-                            Debug.LogError("[BDArmory.ModuleWeapon] MuzzleFX transform missing KSPParticleEmitter component. Please fix your model");
-                            continue;
-                        }
-                        EffectBehaviour.AddParticleEmitter(kpe);
-                        muzzleFlashEmitters.Add(kpe);
-                        kpe.emit = false;
-                    }
-                muzzleFlashList.Add(muzzleFlashEmitters);
-            }
             if (HighLogic.LoadedSceneIsFlight)
             {
                 if (bulletPool == null)
@@ -1547,29 +1538,6 @@ namespace BDArmory.Weapons
                 if (fireTransforms.Length == 0) Debug.LogError($"[BDArmory.ModuleWeapon] Weapon missing fireTransform [{fireTransformName}]! Please fix your model");
                 shellEjectTransforms = part.FindModelTransforms(shellEjectTransformName);
                 if (shellEjectTransforms.Length > 0 && shellPool == null) SetupShellPool();
-
-                //setup emitters
-                using (var pe = part.FindModelComponents<KSPParticleEmitter>().AsEnumerable().GetEnumerator())
-                    while (pe.MoveNext())
-                    {
-                        if (pe.Current == null) continue;
-                        pe.Current.maxSize *= part.rescaleFactor;
-                        pe.Current.minSize *= part.rescaleFactor;
-                        pe.Current.shape3D *= part.rescaleFactor;
-                        pe.Current.shape2D *= part.rescaleFactor;
-                        pe.Current.shape1D *= part.rescaleFactor;
-
-                        if (pe.Current.useWorldSpace && !oneShotWorldParticles)
-                        {
-                            BDAGaplessParticleEmitter gpe = pe.Current.gameObject.AddComponent<BDAGaplessParticleEmitter>();
-                            gpe.part = part;
-                            gaplessEmitters.Add(gpe);
-                        }
-                        else
-                        {
-                            EffectBehaviour.AddParticleEmitter(pe.Current);
-                        }
-                    }
 
                 //setup projectile colors
                 projectileColorC = GUIUtils.ParseColor255(projectileColor);
@@ -1996,10 +1964,6 @@ namespace BDArmory.Weapons
 
         void OnDestroy()
         {
-            if (muzzleFlashList != null)
-                foreach (var pelist in muzzleFlashList)
-                    foreach (var pe in pelist)
-                        if (pe) EffectBehaviour.RemoveParticleEmitter(pe);
             foreach (var pe in part.FindModelComponents<KSPParticleEmitter>())
                 if (pe) EffectBehaviour.RemoveParticleEmitter(pe);
             if (laserRenderers != null)
@@ -3915,30 +3879,8 @@ namespace BDArmory.Weapons
                 PlayFireAnim();
             }
 
-            for (int i = 0; i < muzzleFlashList.Count; i++)
-            {
-                if ((!useRippleFire || fireState.Length == 1) || useRippleFire && i == barrelIndex)
-                    //muzzle flash
-                    using (List<KSPParticleEmitter>.Enumerator pEmitter = muzzleFlashList[i].GetEnumerator())
-                        while (pEmitter.MoveNext())
-                        {
-                            if (pEmitter.Current == null) continue;
-                            if (pEmitter.Current.useWorldSpace && !oneShotWorldParticles) continue;
-                            if (pEmitter.Current.maxEnergy < 0.5f)
-                            {
-                                float twoFrameTime = Mathf.Clamp(Time.deltaTime * 2f, 0.02f, 0.499f);
-                                pEmitter.Current.maxEnergy = twoFrameTime;
-                                pEmitter.Current.minEnergy = twoFrameTime / 3f;
-                            }
-                            pEmitter.Current.Emit();
-                        }
-                using (List<BDAGaplessParticleEmitter>.Enumerator gpe = gaplessEmitters.GetEnumerator())
-                    while (gpe.MoveNext())
-                    {
-                        if (gpe.Current == null) continue;
-                        gpe.Current.EmitParticles();
-                    }
-            }
+            //muzzle flash and smoke
+            fireFX?.Fire(useRippleFire && fireState.Length != 1 ? barrelIndex : -1); // Every barrel, unless ripple firing from one.
             //shell ejection
             if (BDArmorySettings.EJECT_SHELLS)
             {

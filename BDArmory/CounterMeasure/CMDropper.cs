@@ -9,12 +9,13 @@ using BDArmory.Settings;
 using BDArmory.UI;
 using BDArmory.Utils;
 using BDArmory.Extensions;
+using BDArmory.Weapons;
 using BDArmory.Weapons.Missiles;
 using BDArmory.VesselSpawning;
 
 namespace BDArmory.CounterMeasure
 {
-    public class CMDropper : BDAPartModule
+    public class CMDropper : BDAPartModule, IFireEffectOwner
     {
         public static ObjectPool flarePool;
         public static ObjectPool chaffPool;
@@ -46,8 +47,29 @@ namespace BDArmory.CounterMeasure
         [KSPField] public string ejectTransformName = "cmTransform";
         Transform ejectTransform;
 
-        [KSPField] public string effectsTransformName = string.Empty;
-        Transform effectsTransform;
+        [KSPField] public string effectsTransformName = string.Empty; // Legacy: transforms of the emitters baked into the model. Used as the effect if fireEffectName isn't set.
+
+        // Fire effects, from the part's EFFECTS block (see FireEffectController). Each can name several effects (separated by ; or ,) for several launchers.
+        [KSPField] public string fireEffectName = ""; // The flash. If empty, the legacy effectsTransformName emitters are fired.
+        [KSPField] public string smokeEffectName = ""; // Smoke: fired at a power that follows the air density.
+        [KSPField] public string underwaterFireEffectName = ""; // Fired instead of the flash when underwater.
+        [KSPField] public string underwaterSmokeEffectName = ""; // Fired instead of the smoke when underwater.
+        [KSPField] public bool suppressEffectsUnderwater = false; // Underwater with no underwater effect: don't fire the normal one.
+        [KSPField] public float smokeAtmosphereResponse = 1f; // Smoke power = (air density / sea level density)^this. 0 = ignore the atmosphere.
+
+        public FireEffectSettings GetFireEffectSettings() => new FireEffectSettings
+        {
+            fireEffect = fireEffectName,
+            smokeEffect = smokeEffectName,
+            underwaterFireEffect = underwaterFireEffectName,
+            underwaterSmokeEffect = underwaterSmokeEffectName,
+            suppressUnderwater = suppressEffectsUnderwater,
+            smokeAtmosphereResponse = smokeAtmosphereResponse,
+            legacyTransformNames = effectsTransformName,
+            legacyOneShotWorldParticles = true,
+            legacyScaleWithPart = false,
+        };
+        FireEffectController fireFX;
 
         AudioSource audioSource;
         AudioClip cmSound;
@@ -99,6 +121,7 @@ namespace BDArmory.CounterMeasure
 
         public override void OnStart(StartState state)
         {
+            if (fireFX == null) fireFX = new FireEffectController(this, GetFireEffectSettings()); // Created now so its effects are switched off from the start.
             if (part.FindModuleImplementing<MissileLauncher>() != null)
             {
                 isMissileCM = true;
@@ -124,11 +147,6 @@ namespace BDArmory.CounterMeasure
                     ejectTransform = new GameObject().transform;
                     ejectTransform.SetParent(part.transform);
                     ejectTransform.localRotation = Quaternion.AngleAxis(-90, Vector3.right);
-                }
-
-                if (effectsTransformName != string.Empty)
-                {
-                    effectsTransform = part.FindModelTransform(effectsTransformName);
                 }
 
                 part.force_activate();
@@ -195,14 +213,8 @@ namespace BDArmory.CounterMeasure
 
         void FireParticleEffects()
         {
-            if (!effectsTransform) return;
-            using (IEnumerator<KSPParticleEmitter> pe = effectsTransform.gameObject.GetComponentsInChildren<KSPParticleEmitter>().Cast<KSPParticleEmitter>().GetEnumerator())
-                while (pe.MoveNext())
-                {
-                    if (pe.Current == null) continue;
-                    EffectBehaviour.AddParticleEmitter(pe.Current);
-                    pe.Current.Emit();
-                }
+            if (fireFX == null) fireFX = new FireEffectController(this, GetFireEffectSettings());
+            fireFX.Fire();
         }
 
         PartResource GetCMResource()

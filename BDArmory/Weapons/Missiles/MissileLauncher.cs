@@ -78,6 +78,13 @@ namespace BDArmory.Weapons.Missiles
         [KSPField]
         public string boostExhaustTransformName;
 
+        // XYZ scale of the plume (emitter axes: x/y = width, z = length). Applies to exhaust prefabs and to the emitters in the missile model.
+        [KSPField]
+        public Vector3 plumeScale = Vector3.one; // Cruise/main plume.
+
+        [KSPField]
+        public Vector3 boostPlumeScale = Vector3.one; // Boost plume (boostExhaustPrefabPath and the boostTransformName emitters).
+
         #endregion
 
         #region Aero
@@ -678,7 +685,7 @@ namespace BDArmory.Weapons.Missiles
                         while (t.MoveNext())
                         {
                             if (t.Current == null) continue;
-                            AttachExhaustPrefab(exhaustPrefabPath, this, t.Current);
+                            AttachExhaustPrefab(exhaustPrefabPath, this, t.Current, plumeScale);
                         }
                 }
 
@@ -688,7 +695,7 @@ namespace BDArmory.Weapons.Missiles
                         while (t.MoveNext())
                         {
                             if (t.Current == null) continue;
-                            AttachExhaustPrefab(boostExhaustPrefabPath, this, t.Current);
+                            AttachExhaustPrefab(boostExhaustPrefabPath, this, t.Current, boostPlumeScale);
                         }
                 }
 
@@ -764,10 +771,12 @@ namespace BDArmory.Weapons.Missiles
                         }
                 }
 
+                var fireEffectTransforms = FireEffectController.GetManagedTransformNames(part); // Muzzle/launch FX of this part's weapon, launcher or dropper modules.
                 using (var pEmitter = part.FindModelComponents<KSPParticleEmitter>().AsEnumerable().GetEnumerator())
                     while (pEmitter.MoveNext())
                     {
                         if (pEmitter.Current == null) continue;
+                        if (FireEffectController.IsManaged(fireEffectTransforms, part, pEmitter.Current.transform)) continue; // Not thrust FX.
                         var existingGE = pEmitter.Current.GetComponent<BDAGaplessParticleEmitter>();
                         if (existingGE || boostEmitters.Contains(pEmitter.Current))
                         {
@@ -795,6 +804,8 @@ namespace BDArmory.Weapons.Missiles
                             EffectBehaviour.AddParticleEmitter(pEmitter.Current);
                         }
                     }
+
+                ApplyBakedPlumeScale();
 
                 using (IEnumerator<Light> light = gameObject.GetComponentsInChildren<Light>().AsEnumerable().GetEnumerator())
                     while (light.MoveNext())
@@ -5342,11 +5353,37 @@ namespace BDArmory.Weapons.Missiles
             return output.ToString();
         }
 
+        /// <summary>
+        /// Scale the plume emitters that are baked into the missile model (exhaust prefabs are scaled when attached).
+        /// Emitters are scaled on their own axes. RCS emitters and anything already scaled (e.g., inside an exhaust prefab) are left alone.
+        /// </summary>
+        void ApplyBakedPlumeScale()
+        {
+            ScaleBakedPlume(pEmitters, gaplessEmitters, plumeScale);
+            ScaleBakedPlume(boostEmitters, boostGaplessEmitters, boostPlumeScale);
+        }
+
+        static void ScaleBakedPlume(List<KSPParticleEmitter> emitters, List<BDAGaplessParticleEmitter> gapless, Vector3 scale)
+        {
+            if (scale == Vector3.one) return;
+            if (emitters != null)
+                foreach (var e in emitters) ScaleBakedPlumeEmitter(e, scale);
+            if (gapless != null)
+                foreach (var g in gapless) if (g != null) ScaleBakedPlumeEmitter(g.pEmitter != null ? g.pEmitter : g.GetComponent<KSPParticleEmitter>(), scale);
+        }
+
+        static void ScaleBakedPlumeEmitter(KSPParticleEmitter e, Vector3 scale)
+        {
+            if (e == null || e.gameObject.name.Contains("rcs")) return;
+            if (e.GetComponentInParent<FXScaleState>() != null) return; // Already scaled (exhaust prefab, or an emitter in both lists).
+            FXScaleState.Apply(e.gameObject, scale, 1f, false);
+        }
+
         #region ExhaustPrefabPooling
         static Dictionary<string, ObjectPool> exhaustPrefabPool = new Dictionary<string, ObjectPool>();
         List<GameObject> exhaustPrefabs = new List<GameObject>();
 
-        static void AttachExhaustPrefab(string prefabPath, MissileLauncher missileLauncher, Transform exhaustTransform)
+        static void AttachExhaustPrefab(string prefabPath, MissileLauncher missileLauncher, Transform exhaustTransform, Vector3 scale)
         {
             if (!CreateExhaustPool(prefabPath))
             {
@@ -5364,6 +5401,7 @@ namespace BDArmory.Weapons.Missiles
             exhaustPrefab.transform.parent = exhaustTransform;
             exhaustPrefab.transform.localPosition = Vector3.zero;
             exhaustPrefab.transform.localRotation = Quaternion.identity;
+            FXScaleState.Apply(exhaustPrefab, scale, 1f, true); // Always apply (even at 1): pooled prefabs are shared between missiles and need resetting.
             missileLauncher.exhaustPrefabs.Add(exhaustPrefab);
             missileLauncher.part.OnJustAboutToDie += missileLauncher.DetachExhaustPrefabs;
             missileLauncher.part.OnJustAboutToBeDestroyed += missileLauncher.DetachExhaustPrefabs;

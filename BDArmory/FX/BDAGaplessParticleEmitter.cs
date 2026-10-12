@@ -10,6 +10,7 @@ namespace BDArmory.FX
         public KSPParticleEmitter pEmitter;
         private float maxDistance = 0.6f;
         public bool emit = false;
+        public float emissionFactor = 1f; // Fraction of the bridging particles actually emitted by EmitParticles (e.g., thinner smoke at altitude).
         public Part part = null;
         public Rigidbody rb;
         Vector3 internalVelocity;
@@ -113,7 +114,7 @@ namespace BDArmory.FX
             //gameObject.transform.position = startPosition;
             for (int i = 0; i < intermediateSteps; i++)
             {
-                pEmitter.EmitParticle();
+                if (emissionFactor >= 1f || Random.value < emissionFactor) pEmitter.EmitParticle();
                 gameObject.transform.position = Vector3.MoveTowards(gameObject.transform.position, startPosition,
                     maxDistance);
             }

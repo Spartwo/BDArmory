@@ -21,7 +21,7 @@ namespace BDArmory.Weapons.Missiles
     /// Add-on Module to MissileLauncher to extend Launcher functionality to include cluster missiles and multi-missile pods
     /// </summary>
 
-    public class MultiMissileLauncher : BDAPartModule
+    public class MultiMissileLauncher : BDAPartModule, IFireEffectOwner
     {
         public static Dictionary<string, ObjectPool> mslDummyPool = new Dictionary<string, ObjectPool>();
         [KSPField(isPersistant = true)]
@@ -65,12 +65,40 @@ namespace BDArmory.Weapons.Missiles
         [KSPField] public bool permitJettison = false; //allow jettisoning of missiles for multimissile launchrails and similar
         [KSPField] public bool ignoreLauncherColliders = false; //temporarily disable missile colliders to let them clear the launcher, for large-scale VLS or similar. -WARNING- has some effect on missile flight
         AnimationState deployState;
+        // Per-tube animations: clips named <tubeAnimationName> + the tube number (starting at 1), e.g. tubeOpen1, tubeOpen.002 (same convention as the tube transforms).
+        // A clip with no number is played on every launch. Each plays once, from the start, as its tube launches, then plays back in reverse as soon as it finishes.
+        [KSPField] public string tubeAnimationName = "";
+        [KSPField] public float tubeAnimationSpeed = 1; // Negative plays the clip backwards (and rewinds forwards).
+        [KSPField] public float tubeAnimationRewindSpeed = 0; // Speed of the rewind. 0 = same as the launch speed.
+        readonly Dictionary<int, List<AnimationState>> tubeAnimStates = new Dictionary<int, List<AnimationState>>(); // 0-based tube index, or -1 for the shared clips.
+        readonly Dictionary<List<AnimationState>, Coroutine> tubeAnimRoutines = new Dictionary<List<AnimationState>, Coroutine>();
         public ModuleMissileRearm missileSpawner = null;
         MissileLauncher missileLauncher = null;
         [KSPField] public bool adjustMissileVOffset = false; //should missile vertical offset dynamically adjust based on missile diameter (for MMLs on adjustable rails, etc)
         [KSPField(isPersistant = true)] float attachedMissileDiameter = 0;
         MissileFire FiredByWM = null; // Assigned when fired and then not updated even if the parent craft changes their primary WM.
         private int tubesFired = 0;
+        // Fire effects, from the part's EFFECTS block (see FireEffectController). Each can name several effects (separated by ; or ,) for several tubes (tube i uses entry i), or name numbered effects: with launchFX, launchFX1/launchFX.002 are tubes 1/2.
+        [KSPField] public string fireEffectName = ""; // The flash. Fired for each tube launched.
+        [KSPField] public string smokeEffectName = ""; // Smoke: fired at a power that follows the air density.
+        [KSPField] public string underwaterFireEffectName = ""; // Fired instead of the flash when underwater.
+        [KSPField] public string underwaterSmokeEffectName = ""; // Fired instead of the smoke when underwater.
+        [KSPField] public bool suppressEffectsUnderwater = false; // Underwater with no underwater effect: don't fire the normal one.
+        [KSPField] public float smokeAtmosphereResponse = 1f; // Smoke power = (air density / sea level density)^this. 0 = ignore the atmosphere.
+
+        public FireEffectSettings GetFireEffectSettings() => new FireEffectSettings
+        {
+            fireEffect = fireEffectName,
+            smokeEffect = smokeEffectName,
+            underwaterFireEffect = underwaterFireEffectName,
+            underwaterSmokeEffect = underwaterSmokeEffectName,
+            suppressUnderwater = suppressEffectsUnderwater,
+            smokeAtmosphereResponse = smokeAtmosphereResponse,
+            legacyTransformNames = "",
+            legacyOneShotWorldParticles = false,
+            legacyScaleWithPart = true,
+        };
+        FireEffectController fireFX; // Launch effects (blast, smoke), fired for each tube launched.
         [KSPField(isPersistant = true)]
         private bool LoadoutModified = false;
         public BDTeam Team = null;
@@ -179,6 +207,8 @@ namespace BDArmory.Weapons.Missiles
                 GameEvents.onPartDie.Add(OnPartDie);
                 if (isClusterMissile && vessel.Parts.Count == 1) isLaunchedClusterMissile = true;
             }
+            SetUpTubeAnimations();
+            if (fireFX == null) fireFX = new FireEffectController(this, GetFireEffectSettings()); // Created now so its effects are switched off from the start.
             if (!string.IsNullOrEmpty(deployAnimationName))
             {
                 Events[nameof(ToggleBay)].guiActiveEditor = true;
@@ -771,6 +801,98 @@ namespace BDArmory.Weapons.Missiles
             UI_FloatRange salvo = (UI_FloatRange)Fields[nameof(salvoSize)].uiControlEditor;
             salvo.maxValue = launchTransforms.Length;
         }
+        void SetUpTubeAnimations()
+        {
+            tubeAnimStates.Clear();
+            if (string.IsNullOrEmpty(tubeAnimationName)) return;
+            foreach (var anim in part.FindModelComponents<Animation>())
+            {
+                if (anim == null || anim.GetComponentInParent<MissileDummy>() != null) continue; // Not a missile's own animations.
+                var states = new List<AnimationState>();
+                foreach (AnimationState state in anim) states.Add(state);
+                foreach (var state in states)
+                {
+                    int key;
+                    if (state.name == tubeAnimationName) key = -1;
+                    else if (NumberSuffix.TryParse(state.name, tubeAnimationName, out int number)) key = number - 1;
+                    else continue;
+                    anim.animatePhysics = true;
+                    state.wrapMode = WrapMode.ClampForever;
+                    state.speed = 0;
+                    state.normalizedTime = tubeAnimationSpeed < 0 ? 1 : 0;
+                    state.enabled = true;
+                    anim.Blend(state.name);
+                    if (!tubeAnimStates.TryGetValue(key, out var list)) tubeAnimStates[key] = list = new List<AnimationState>();
+                    list.Add(state);
+                }
+            }
+        }
+
+        /// <summary>Play a tube's animation (its own numbered one, else the shared one) from the start, then rewind it.</summary>
+        void PlayTubeAnimation(int tube)
+        {
+            if (tubeAnimStates.Count == 0) return;
+            if (!tubeAnimStates.TryGetValue(tube, out var states) && !tubeAnimStates.TryGetValue(-1, out states)) return;
+            StopTubeAnimationRoutine(states); // Restarting (e.g., a shared clip in a salvo) cancels any rewind in progress.
+            foreach (var state in states)
+            {
+                if (state == null) continue;
+                state.normalizedTime = tubeAnimationSpeed < 0 ? 1 : 0;
+                state.speed = tubeAnimationSpeed;
+            }
+            tubeAnimRoutines[states] = StartCoroutine(PlayAndRewindTubeAnimation(states));
+        }
+
+        void StopTubeAnimationRoutine(List<AnimationState> states)
+        {
+            if (tubeAnimRoutines.TryGetValue(states, out var routine))
+            {
+                if (routine != null) StopCoroutine(routine);
+                tubeAnimRoutines.Remove(states);
+            }
+        }
+
+        /// <summary>Wait for the clips to play through, then play them back in reverse to their start (they don't wait for the tube to be reloaded).</summary>
+        IEnumerator PlayAndRewindTubeAnimation(List<AnimationState> states)
+        {
+            bool backwards = tubeAnimationSpeed < 0; // The clips run from 1 to 0 when launching; the rewind goes back up.
+            while (part != null && states.Exists(st => st != null && (backwards ? st.normalizedTime > 0 : st.normalizedTime < 1)))
+                yield return null;
+            float rewindSpeed = tubeAnimationRewindSpeed > 0 ? tubeAnimationRewindSpeed : Mathf.Abs(tubeAnimationSpeed);
+            foreach (var st in states)
+            {
+                if (st == null) continue;
+                st.normalizedTime = backwards ? 0 : 1; // Clamped clips keep counting past the end: start the rewind from the end exactly.
+                st.speed = backwards ? rewindSpeed : -rewindSpeed;
+            }
+            while (part != null && states.Exists(st => st != null && (backwards ? st.normalizedTime < 1 : st.normalizedTime > 0)))
+                yield return null;
+            foreach (var st in states)
+            {
+                if (st == null) continue;
+                st.speed = 0;
+                st.normalizedTime = backwards ? 1 : 0;
+            }
+            tubeAnimRoutines.Remove(states);
+        }
+
+        /// <summary>Snap a tube's animations (and the shared ones) back to their start. Normally they have already rewound themselves; this catches one still playing when its tube is reloaded.</summary>
+        void ResetTubeAnimation(int tube)
+        {
+            if (tubeAnimStates.Count == 0) return;
+            foreach (var key in new[] { tube, -1 })
+            {
+                if (!tubeAnimStates.TryGetValue(key, out var states)) continue;
+                StopTubeAnimationRoutine(states);
+                foreach (var state in states)
+                {
+                    if (state == null) continue;
+                    state.speed = 0;
+                    state.normalizedTime = tubeAnimationSpeed < 0 ? 1 : 0;
+                }
+            }
+        }
+
         public void PopulateMissileDummies(bool refresh = false)
         {
             bool populateDummies = true;
@@ -794,6 +916,7 @@ namespace BDArmory.Weapons.Missiles
                     //if (launchTransforms[i].localScale != new Vector3(1 / Scale, 1 / Scale, 1 / (Scale * Length)))
                     launchTransforms[i].localScale = new Vector3(1f / Scale, 1f / Scale, 1f / (LengthTransform != null ? Length : Scale));
                     //}
+                    ResetTubeAnimation(i);
                     tubesFired = 0;
                 }
                 else
@@ -809,10 +932,11 @@ namespace BDArmory.Weapons.Missiles
                     MissileDummy dummyThis = dummy.GetComponentInChildren<MissileDummy>();
 
                     launchTransforms[i].localScale = new Vector3(1f / Scale, 1f / Scale, 1f / (LengthTransform != null ? Length : Scale));
+                    ResetTubeAnimation(i);
 
                     dummy.transform.parent = null;
                     dummy.transform.localScale = dummyScale;
-                    dummyThis.AttachAt(part, launchTransforms[i]);
+                    dummyThis.AttachAt(part, launchTransforms[i], i);
                     if (adjustMissileVOffset && attachedMissileDiameter > 0) dummyThis.transform.localPosition = new Vector3(attachedMissileDiameter / 2, 0, 0);
                     var mslAnim = dummy.GetComponentInChildren<Animation>();
                     if (mslAnim != null) mslAnim.enabled = false;
@@ -920,6 +1044,16 @@ namespace BDArmory.Weapons.Missiles
                 launchesThisSalvo++;
                 float accel = missileLauncher.dropTime > 0f ? 0f : missileLauncher.thrust / Mathf.Max(missileMass, 0.001f);// Pop off the tube's covers before the tube is hidden by scaling it to zero.
                 part.FindModuleImplementing<ModuleTubeCovers>()?.Eject(launchTransforms[m], accel, missileLauncher.decoupleSpeed);
+                try // Launch FX are cosmetic: a failure here must never stop a missile from launching.
+                {
+                    if (fireFX == null) fireFX = new FireEffectController(this, GetFireEffectSettings());
+                    fireFX.Fire(m); // Before the tube is scaled to zero.
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[BDArmory.MultiMissileLauncher]: Failed to fire launch FX for tube {m} on {part.name}: {ex}");
+                }
+                PlayTubeAnimation(m);
                 launchTransforms[m].localScale = Vector3.zero;
                 missileSpawner.spawnVariantName = GetMissileVariantName();
                 //time to deduct ammo = !clustermissile or cluster missile still on plane
