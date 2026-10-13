@@ -50,7 +50,7 @@ namespace BDArmory.CounterMeasure
         [KSPField] public string effectsTransformName = string.Empty; // Legacy: transforms of the emitters baked into the model. Used as the effect if fireEffectName isn't set.
 
         // Fire effects, from the part's EFFECTS block (see FireEffectController). Each can name several effects (separated by ; or ,) for several launchers.
-        [KSPField] public string fireEffectName = ""; // The flash. If empty, the legacy effectsTransformName emitters are fired.
+        [KSPField] public string fireEffectName = ""; // A secondary flash, fired in addition to the legacy effect (effectsTransformName), which keeps firing.
         [KSPField] public string smokeEffectName = ""; // Smoke: fired at a power that follows the air density.
         [KSPField] public string underwaterFireEffectName = ""; // Fired instead of the flash when underwater.
         [KSPField] public string underwaterSmokeEffectName = ""; // Fired instead of the smoke when underwater.
@@ -68,6 +68,7 @@ namespace BDArmory.CounterMeasure
             legacyTransformNames = effectsTransformName,
             legacyOneShotWorldParticles = true,
             legacyScaleWithPart = false,
+            legacyAdditive = true, // The legacy smoke effect is the primary effect; fireEffectName is a secondary flash on top of it.
         };
         FireEffectController fireFX;
 

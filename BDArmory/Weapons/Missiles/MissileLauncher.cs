@@ -85,6 +85,25 @@ namespace BDArmory.Weapons.Missiles
         [KSPField]
         public Vector3 boostPlumeScale = Vector3.one; // Boost plume (boostExhaustPrefabPath and the boostTransformName emitters).
 
+        // Plume effects, from the part's EFFECTS block (see MissilePlumeEffects). If any is named they replace the legacy plume: exhaustPrefabPath,
+        // boostExhaustPrefabPath and the emitters baked into the model (and so plumeScale/boostPlumeScale: use the effects' own localScale instead).
+        [KSPField] public string boostEffectName = ""; // Boost plume. Power follows the throttle.
+        [KSPField] public string plumeEffectName = ""; // Cruise plume. Power follows the throttle.
+        [KSPField] public string smokeTrailEffectName = ""; // Smoke trail during boost and cruise. Power follows the throttle and the air density.
+        [KSPField] public float plumeFadeTime = 5f; // After burnout the cruise plume and trail fade out over this long.
+        [KSPField] public float smokeAtmosphereResponse = 1f; // Smoke trail power = throttle * (air density / sea level density)^this. 0 = ignore the atmosphere.
+        MissilePlumeEffects plumeFX;
+        bool usePlumeEffects = false;
+
+        PlumeEffectSettings GetPlumeEffectSettings() => new PlumeEffectSettings
+        {
+            boostEffect = boostEffectName,
+            cruiseEffect = plumeEffectName,
+            smokeTrailEffect = smokeTrailEffectName,
+            fadeTime = plumeFadeTime,
+            smokeAtmosphereResponse = smokeAtmosphereResponse,
+        };
+
         #endregion
 
         #region Aero
@@ -679,7 +698,10 @@ namespace BDArmory.Weapons.Missiles
                 gauge = (BDStagingAreaGauge)part.AddModule("BDStagingAreaGauge");
                 part.force_activate();
 
-                if (!string.IsNullOrEmpty(exhaustPrefabPath))
+                plumeFX = new MissilePlumeEffects(this, GetPlumeEffectSettings());
+                usePlumeEffects = plumeFX.Active; // The effects replace the legacy plume.
+
+                if (!usePlumeEffects && !string.IsNullOrEmpty(exhaustPrefabPath))
                 {
                     using (var t = part.FindModelTransforms("exhaustTransform").AsEnumerable().GetEnumerator())
                         while (t.MoveNext())
@@ -689,7 +711,7 @@ namespace BDArmory.Weapons.Missiles
                         }
                 }
 
-                if (!string.IsNullOrEmpty(boostExhaustPrefabPath) && !string.IsNullOrEmpty(boostExhaustTransformName))
+                if (!usePlumeEffects && !string.IsNullOrEmpty(boostExhaustPrefabPath) && !string.IsNullOrEmpty(boostExhaustTransformName))
                 {
                     using (var t = part.FindModelTransforms(boostExhaustTransformName).AsEnumerable().GetEnumerator())
                         while (t.MoveNext())
@@ -772,6 +794,7 @@ namespace BDArmory.Weapons.Missiles
                 }
 
                 var fireEffectTransforms = FireEffectController.GetManagedTransformNames(part); // Muzzle/launch FX of this part's weapon, launcher or dropper modules.
+                if (usePlumeEffects) fireEffectTransforms.UnionWith(MissilePlumeEffects.GetTransformNames(part, GetPlumeEffectSettings())); // And the plume effects' own emitters.
                 using (var pEmitter = part.FindModelComponents<KSPParticleEmitter>().AsEnumerable().GetEnumerator())
                     while (pEmitter.MoveNext())
                     {
@@ -805,7 +828,8 @@ namespace BDArmory.Weapons.Missiles
                         }
                     }
 
-                ApplyBakedPlumeScale();
+                if (usePlumeEffects) RemoveLegacyPlume();
+                else ApplyBakedPlumeScale();
 
                 using (IEnumerator<Light> light = gameObject.GetComponentsInChildren<Light>().AsEnumerable().GetEnumerator())
                     while (light.MoveNext())
@@ -3403,6 +3427,8 @@ namespace BDArmory.Weapons.Missiles
                         }
                     }
 
+                if (usePlumeEffects) UpdateBoostPlume();
+
                 if (spoolEngine)
                 {
                     currentThrust = Mathf.MoveTowards(currentThrust, thrust, thrust / 10);
@@ -3467,6 +3493,11 @@ namespace BDArmory.Weapons.Missiles
 
         void EndBoost()
         {
+            if (usePlumeEffects)
+            {
+                plumeFX.SetBoost(0f);
+                plumeFX.SetTrail(0f); // (The cruise stage turns it back on.)
+            }
             using (var emitter = boostEmitters.GetEnumerator())
                 while (emitter.MoveNext())
                 {
@@ -3629,6 +3660,8 @@ namespace BDArmory.Weapons.Missiles
                         }
                     }
 
+                if (usePlumeEffects) UpdateCruisePlume();
+
                 if (spoolEngine)
                 {
                     currentThrust = Mathf.MoveTowards(currentThrust, cruiseThrust, cruiseThrust / 10);
@@ -3682,6 +3715,8 @@ namespace BDArmory.Weapons.Missiles
             MissileState = MissileStates.PostThrust;
 
             currentThrust = 0f;
+
+            if (usePlumeEffects) plumeFX.BeginFadeOut(); // The plume lingers and fades, as the legacy one does.
 
             if (useFuel) burnedFuelMass = cruiseFuelMass + boosterFuelMass;
 
@@ -4390,6 +4425,7 @@ namespace BDArmory.Weapons.Missiles
                 }
             }
 
+            if (usePlumeEffects) plumeFX.DetachTrail(); // Leave the smoke trail behind (the legacy gapless emitters are left behind below).
             using (var e = gaplessEmitters.GetEnumerator())
                 while (e.MoveNext())
                 {
@@ -5357,6 +5393,38 @@ namespace BDArmory.Weapons.Missiles
         /// Scale the plume emitters that are baked into the missile model (exhaust prefabs are scaled when attached).
         /// Emitters are scaled on their own axes. RCS emitters and anything already scaled (e.g., inside an exhaust prefab) are left alone.
         /// </summary>
+        /// <summary>
+        /// The plume effects replace the legacy plume: stop driving the emitters baked into the model (they stay off) by emptying the legacy plume lists.
+        /// RCS emitters aren't part of the plume and stay.
+        /// </summary>
+        void RemoveLegacyPlume()
+        {
+            pEmitters.RemoveAll(pe => pe == null || !pe.gameObject.name.Contains("rcs"));
+            boostEmitters.RemoveAll(pe => pe == null || !pe.gameObject.name.Contains("rcs"));
+            foreach (var gpe in gaplessEmitters) if (gpe != null) Destroy(gpe); // (Added by the loop above, to emitters that now stay off.)
+            gaplessEmitters.Clear();
+            foreach (var gpe in boostGaplessEmitters) if (gpe != null) Destroy(gpe);
+            boostGaplessEmitters.Clear();
+        }
+
+        /// <summary>Boost plume power follows the throttle, as the legacy boost emitters do. The trail is subject to the same conditions as the legacy gapless emitters.</summary>
+        void UpdateBoostPlume()
+        {
+            float power = Throttle == 0 || thrust == 0 ? 0f : Throttle;
+            plumeFX.SetBoost(power);
+            bool trail = ((!vessel.InVacuum() && Throttle > 0) && weaponClass != WeaponClasses.SLW) || (weaponClass == WeaponClasses.SLW && vessel.altitude < 0); //#710
+            plumeFX.SetTrail(trail ? power : 0f);
+        }
+
+        /// <summary>Cruise plume and trail power follow the throttle, with no thrust FX for torpedoes out of the water (#710), as for the legacy emitters.</summary>
+        void UpdateCruisePlume()
+        {
+            bool outOfWater = (weaponClass == WeaponClasses.SLW || _missileType == MissileType.ASWMissile) && vessel.altitude > 0;
+            float power = outOfWater || Throttle == 0 || cruiseThrust == 0 ? 0f : Throttle;
+            plumeFX.SetCruise(power);
+            plumeFX.SetTrail(power);
+        }
+
         void ApplyBakedPlumeScale()
         {
             ScaleBakedPlume(pEmitters, gaplessEmitters, plumeScale);

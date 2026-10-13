@@ -30,6 +30,11 @@ namespace BDArmory.Weapons
         /// </summary>
         public string legacyTransformNames;
         public bool legacyOneShotWorldParticles, legacyScaleWithPart;
+        /// <summary>
+        /// The legacy emitters are the module's primary effect and keep firing even when fireEffect is set (which is then a secondary flash on top of it),
+        /// instead of being replaced by it. To stop the legacy effect, don't list its transforms.
+        /// </summary>
+        public bool legacyAdditive;
     }
 
     /// <summary>
@@ -46,6 +51,8 @@ namespace BDArmory.Weapons
     ///   fireEffectName  : the flash. Fired at full power. If not set, the legacy fields name baked emitters (muzzleTransformName, effectsTransformName), which
     ///                     are treated as the flash and emitted directly (emit=false at start, rescaling, gapless world-space emitters).
     ///                     If fireEffectName IS set, emitters still baked into those legacy transforms are just silenced (emit=false), never fired.
+    ///                     Exception: a smoke launcher (CMDropper) treats its legacy effect (effectsTransformName) as its primary effect, which keeps
+    ///                     firing; fireEffectName is then a secondary flash fired in addition to it. To drop the legacy effect, don't list its transforms.
     /// Every effect is set to 0 power when the controller is created (and again shortly after), so nothing runs until it's fired.
     ///   smokeEffectName : smoke. Its power follows the atmosphere: (air density / sea level)^smokeAtmosphereResponse, so the effect's own curves
     ///                     (emission, size, ...) decide what thinner air looks like. Not fired at all below ~2%.
@@ -117,7 +124,7 @@ namespace BDArmory.Weapons
         }
 
         /// <summary>The effects in a part's EFFECTS block and the transform names each uses.</summary>
-        static Dictionary<string, List<string>> ReadEffects(Part part)
+        internal static Dictionary<string, List<string>> ReadEffects(Part part)
         {
             var result = new Dictionary<string, List<string>>();
             var node = part.partInfo != null && part.partInfo.partConfig != null ? part.partInfo.partConfig.GetNode("EFFECTS") : null;
@@ -183,7 +190,7 @@ namespace BDArmory.Weapons
             smoke = new EffectSlots(part, settings.smokeEffect, effects, "smoke", false);
             underwaterFire = new EffectSlots(part, settings.underwaterFireEffect, effects, "underwater fire", true);
             underwaterSmoke = new EffectSlots(part, settings.underwaterSmokeEffect, effects, "underwater smoke", false);
-            if (!fire.Any) SetUpLegacyFlash();
+            if (!fire.Any || settings.legacyAdditive) SetUpLegacyFlash();
             else SilenceLegacyEmitters(); // The effects replace the legacy flash.
             part.OnJustAboutToBeDestroyed += Dispose;
             // Nothing should be running until something fires. Effects can be instantiated after this runs, so stop them again a little later.
@@ -210,7 +217,7 @@ namespace BDArmory.Weapons
             for (int frame = 0; frame < 60 && part != null; ++frame)
             {
                 yield return null;
-                if (part == null) yield break;
+                if (part == null || fired) yield break; // (A launcher that spawns a live missile can fire within the first second.)
                 StopEffects(refresh: frame < 10 || frame % 10 == 0);
             }
             if (part == null) yield break;
@@ -224,7 +231,9 @@ namespace BDArmory.Weapons
         readonly List<EffectLight> effectLights = new List<EffectLight>();
 
         /// <summary>True if the transform exists, at the same path, in the part's prefab (i.e., it's part of the model, not something added at runtime).</summary>
-        bool IsBakedInModel(Transform transform)
+        bool IsBakedInModel(Transform transform) => IsBaked(part, transform);
+
+        internal static bool IsBaked(Part part, Transform transform)
         {
             var prefab = part.partInfo != null ? part.partInfo.partPrefab : null;
             if (prefab == null) return true; // Can't tell.
@@ -323,13 +332,15 @@ namespace BDArmory.Weapons
         /// </summary>
         public void Fire(int index = -1)
         {
+            fired = true; // Stops the start-up sweep (which clears emitters) from wiping a real shot.
+            if (settings.legacyAdditive && legacyGroups.Count > 0) FireLegacyFlash(index); // The primary effect, in addition to any effects.
             FireKind(fire, underwaterFire, index, false);
             FireKind(smoke, underwaterSmoke, index, true);
         }
 
         void FireKind(EffectSlots normal, EffectSlots water, int index, bool isSmoke)
         {
-            bool legacy = !isSmoke && !normal.Any && legacyGroups.Count > 0;
+            bool legacy = !settings.legacyAdditive && !isSmoke && !normal.Any && legacyGroups.Count > 0;
             if (!normal.Any && !water.Any && !legacy) return;
             Transform reference = normal.Any ? normal.reference : (legacy ? legacyGroups[0].reference : water.reference);
             if (IsUnderwater(reference))
@@ -401,6 +412,7 @@ namespace BDArmory.Weapons
 
         #region Environment
         float smokeFactor = 1f, lastEnvTime = -1f;
+        bool fired = false;
 
         bool IsUnderwater(Transform reference)
         {
